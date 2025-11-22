@@ -1,19 +1,35 @@
 from typing import List
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.cloud import storage
 from utils import read_gcs_csv, process_zip_file
+import pandas as pd
+import json
+
 
 app = FastAPI(title="Urban Computing API")
 
-# 定義資料模型（可選）
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://100.65.146.94:5173"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class SensorData(BaseModel):
     user_id: str
     pressure: float
     temperature: float
     timestamp: str
 
-# 根路徑
 @app.get("/")
 def read_root():
     return {"message": "FastAPI backend is running!"}
@@ -23,9 +39,6 @@ SELF_DATA_FILE = "merged.csv"
 
 @app.get("/selfdata")
 def get_self_data():
-    """
-    使用共用函式讀取 merged.csv，回傳 JSON 格式。
-    """
     df = read_gcs_csv(SELF_DATA_BUCKET_NAME, SELF_DATA_FILE)
     records = df.to_dict(orient="records")
     return {"status": "success", "records": records}
@@ -36,8 +49,16 @@ ALL_DATA_FILE = "all_data.csv"
 @app.get("/openweatherdata")
 def get_open_weather_data():
     df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
-    records = df.to_dict(orient="records")
+
+    # 🛠 修正 NaN / Inf → 轉成 None，避免 JSON encode 崩潰
+    df = df.replace([float("inf"), float("-inf")], pd.NA)
+    df = df.fillna(pd.NA)
+
+    # 用 pandas.to_json 保證正確序列化
+    records = json.loads(df.to_json(orient="records"))
+
     return {"status": "success", "records": records}
+
 
 # Upload single file
 @app.post("/upload")
