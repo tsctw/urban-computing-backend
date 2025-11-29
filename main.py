@@ -1,11 +1,15 @@
 from typing import List
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.cloud import storage
 from utils import read_gcs_csv, process_zip_file
+from fusion import get_latest_pressure_sequence, get_latest_weather_sequence
+import numpy as np
 import pandas as pd
 import json
+import tensorflow as tf
+import joblib
 
 
 app = FastAPI(title="Urban Computing API")
@@ -96,3 +100,83 @@ async def upload_batch(files: List[UploadFile] = File(...)):
         "success_count": len(success_files),
         "failed_count": len(failed_files),
     }
+
+# -------------------------------------------------------------
+# Load model + scalers ONCE (avoid loading at each request)
+# -------------------------------------------------------------
+model = None
+scaler_x = None
+scaler_y = None
+
+MODEL_PATH = "model_pressure_single.keras"
+SCALER_X_PATH = "scaler_pressure_x.pkl"
+SCALER_Y_PATH = "scaler_pressure_y.pkl"
+
+model = tf.keras.models.load_model("model_pressure_single.keras")
+scaler_x = joblib.load("scaler_pressure_x.pkl")
+scaler_y = joblib.load("scaler_pressure_y.pkl")
+
+
+@app.get("/prediction_pressure")
+def prediction_pressure():
+    try:
+        seq_input = get_latest_pressure_sequence(scaler_x)
+
+        # model output: [p6, p12, p24] (all scaled)
+        p6_scaled, p12_scaled, p24_scaled = model.predict(seq_input)
+
+        # inverse transform
+        p6 = scaler_y.inverse_transform(p6_scaled.reshape(-1, 1)).flatten().tolist()
+        p12 = scaler_y.inverse_transform(p12_scaled.reshape(-1, 1)).flatten().tolist()
+        p24 = scaler_y.inverse_transform(p24_scaled.reshape(-1, 1)).flatten().tolist()
+
+        # map output to user request
+        result = {
+            "p6": p6,
+            "p12": p12,
+            "p24": p24,
+        }
+
+        return result
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+model_weather = tf.keras.models.load_model("model_weather.keras")
+scaler_weather = joblib.load("scaler_weather.pkl")
+
+with open("weather_label_map.json", "r") as f:
+    id_to_label = json.load(f)
+
+@app.get("/prediction_weather")
+def prediction_weather():
+
+    try:
+        seq_input = get_latest_weather_sequence(scaler_weather)
+
+        # model returns 3 outputs: (w6, w12, w24)
+        w6_s, w12_s, w24_s = model_weather.predict(seq_input)
+
+        # softmax → label
+        def decode_weather(softmax_arr):
+            labels = []
+            for step in softmax_arr:
+                idx = int(np.argmax(step))
+                labels.append(id_to_label[str(idx)])
+            return labels
+
+        w6  = decode_weather(w6_s[0])
+        w12 = decode_weather(w12_s[0])
+        w24 = decode_weather(w24_s[0])
+
+        return {
+            "weather": {
+                "w6":  w6,   # 3 items
+                "w12": w12,  # 6 items
+                "w24": w24   # 12 items
+            }
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
