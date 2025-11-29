@@ -1,6 +1,6 @@
 import io
 import json
-from fusion import calibration, data_fusion
+from fusion import calibration, data_fusion, data_fusion_2
 import numpy as np
 import pandas as pd
 from google.cloud import storage
@@ -54,14 +54,12 @@ def load_and_prepare_data():
     aligned = data_fusion()
 
     # Step 2: run calibration
-    aligned = calibration(aligned)
+    calibration_self = calibration(aligned)
 
-    # 必須確認校正後的欄位存在
-    if "Pressure_corrected" not in aligned.columns:
-        raise ValueError("Pressure_corrected column not found! Calibration failed.")
+    data = data_fusion_2(calibration_self)
 
     # X,y = 校正後壓力
-    X_raw = aligned["Pressure_corrected"].values.astype("float32").reshape(-1, 1)
+    X_raw = data["Pressure_self_corrected"].values.astype("float32").reshape(-1, 1)
     y_raw = X_raw.copy()
 
     # 標準化

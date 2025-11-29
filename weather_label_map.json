@@ -1,6 +1,9 @@
 {
-  "0": "Clouds",
-  "1": "Rain",
+  "0": "Rain",
+  "1": "Clouds",
   "2": "Drizzle",
-  "3": "Clear"
+  "3": "Clear",
+  "4": "Fog",
+  "5": "Mist",
+  "6": "Snow"
 }

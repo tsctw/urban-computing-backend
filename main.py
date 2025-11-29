@@ -130,11 +130,31 @@ def prediction_pressure():
         p12 = scaler_y.inverse_transform(p12_scaled.reshape(-1, 1)).flatten().tolist()
         p24 = scaler_y.inverse_transform(p24_scaled.reshape(-1, 1)).flatten().tolist()
 
+        df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
+
+        # 🛠 修正 NaN / Inf → 轉成 None，避免 JSON encode 崩潰
+        df = df.replace([float("inf"), float("-inf")], pd.NA)
+        df = df.fillna(pd.NA)
+
+        # 1. 先按時間降冪 → 找最新 10 筆
+        latest10 = df.sort_values("timestamp", ascending=False).head(10)
+
+        # 2. 再把這10筆按時間升冪排序
+        latest10_sorted = latest10.sort_values("timestamp", ascending=True)
+
+        # 3. 只取壓力欄位（假設叫 Pressure_weather）
+        pressure_last10 = latest10_sorted["pressure"].tolist()
+
+
         # map output to user request
         result = {
-            "p6": p6,
-            "p12": p12,
-            "p24": p24,
+            "status": "success",
+            "pressure": {
+                "last10": pressure_last10,
+                "p6": p6,
+                "p12": p12,
+                "p24": p24,
+            }
         }
 
         return result
@@ -170,11 +190,24 @@ def prediction_weather():
         w12 = decode_weather(w12_s[0])
         w24 = decode_weather(w24_s[0])
 
+        df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
+
+        df = df.replace([float("inf"), float("-inf")], pd.NA)
+        df = df.fillna(pd.NA)
+
+        latest10 = df.sort_values("timestamp", ascending=False).head(10)
+
+        latest10_sorted = latest10.sort_values("timestamp", ascending=True)
+
+        weather_last10 = latest10_sorted["weather_main"].tolist()
+
         return {
+            "status": "success",
             "weather": {
-                "w6":  w6,   # 3 items
-                "w12": w12,  # 6 items
-                "w24": w24   # 12 items
+                "last10": weather_last10,
+                "w6":  w6,
+                "w12": w12,
+                "w24": w24 
             }
         }
 

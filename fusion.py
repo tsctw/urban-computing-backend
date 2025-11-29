@@ -1,5 +1,6 @@
 from utils import read_gcs_csv
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 
@@ -25,6 +26,8 @@ def data_fusion():
     # filter self data after weather data is available
     self_df = self_df[self_df["Time"] >= start_time]
 
+    self_df.to_csv("self_df__output.csv", index=False)
+
     aligned = pd.merge_asof(
         self_df.sort_values("Time"),
         weather_df.sort_values("Time"),
@@ -38,10 +41,13 @@ def data_fusion():
         "Pressure": "Pressure_self",
         "pressure": "Pressure_weather"
     })
+
+    aligned.to_csv("fusion_output.csv", index=False)
     
     aligned["diff_before"] = aligned["Pressure_self"] - aligned["Pressure_weather"]
 
     return aligned
+
 
 def draw_fusion(aligned):
 
@@ -61,7 +67,7 @@ def draw_fusion(aligned):
 # 3. Compute Pre-Calibration Error
 # --------------------------------------------------------
 
-def calibration(aligned):
+def calibration(aligned, n=10):
 
     mean_before = aligned["diff_before"].mean()
     std_before = aligned["diff_before"].std()
@@ -71,7 +77,7 @@ def calibration(aligned):
     print(f"  Standard deviation: {std_before:.4f} hPa")
 
     # --------------------------------------------------------
-    # 4. Train Linear Regression Calibration Model
+    # Train Linear Regression Calibration Model
     # --------------------------------------------------------
     model = LinearRegression()
     model.fit(
@@ -87,12 +93,15 @@ def calibration(aligned):
 
 
     # --------------------------------------------------------
-    # 5. Apply Calibration
+    # Apply Calibration
     # --------------------------------------------------------
     aligned["Pressure_corrected"] = a * aligned["Pressure_self"] + b
 
     # Compute corrected error
     aligned["diff_after"] = aligned["Pressure_corrected"] - aligned["Pressure_weather"]
+
+
+    aligned.to_csv("calibration_output.csv", index=False)
 
     mean_after = aligned["diff_after"].mean()
     std_after = aligned["diff_after"].std()
@@ -103,10 +112,10 @@ def calibration(aligned):
     return aligned
 
 
+# --------------------------------------------------------
+# 6. Plot Comparison
+# --------------------------------------------------------
 def draw_calibration(aligned):
-    # --------------------------------------------------------
-    # 6. Plot Comparison
-    # --------------------------------------------------------
     plt.figure(figsize=(12, 5))
     plt.plot(aligned["Time"], aligned["diff_before"], label="Before Calibration", alpha=0.7)
     plt.plot(aligned["Time"], aligned["diff_after"], label="After Calibration", alpha=0.7)
@@ -129,6 +138,99 @@ def draw_calibration(aligned):
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    將 df（含 Time、Pressure_corrected）按照 5 分鐘 gap 壓縮分組：
+      - Time 按升冪排序
+      - 與上一筆差 < 5 min → 同組
+      - 差 >= 5 min → 新組
+      - Time 使用每組第一筆
+      - 平均 Pressure_corrected
+    """
+    df = df[["Time", "Pressure_corrected"]].copy()
+    df["Time"] = pd.to_datetime(df["Time"])
+    df = df.sort_values("Time")
+
+    if len(df) == 0:
+        return df
+
+    groups = []
+    current_start_time = df.iloc[0]["Time"]
+    current_values = [df.iloc[0]["Pressure_corrected"]]
+    prev_time = df.iloc[0]["Time"]
+
+    for i in range(1, len(df)):
+        t = df.iloc[i]["Time"]
+        p = df.iloc[i]["Pressure_corrected"]
+
+        if t - prev_time < pd.Timedelta(minutes=5):
+            current_values.append(p)
+        else:
+            groups.append({
+                "Time": current_start_time,
+                "Pressure_corrected": sum(current_values) / len(current_values)
+            })
+            current_start_time = t
+            current_values = [p]
+
+        prev_time = t
+
+    # 收最後一組（修正欄名！）
+    groups.append({
+        "Time": current_start_time,
+        "Pressure_corrected": sum(current_values) / len(current_values)
+    })
+
+    out_df = pd.DataFrame(groups).sort_values("Time").reset_index(drop=True)
+    return out_df
+
+def data_fusion_2(calibration_self):
+    # -----------------------------------
+    # 1. Load data
+    # -----------------------------------
+    weather_df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
+
+    # Convert timestamp
+    weather_df["Time"] = pd.to_datetime(weather_df["timestamp"], unit="s", utc=True).dt.tz_convert("Europe/Dublin")
+
+    calibration_self = compress_by_5min_gap(calibration_self)
+    calibration_self.to_csv("balbalbal_output.csv", index=False)
+
+    self_times_ns    = calibration_self["Time"].astype("int64").to_numpy()
+
+    self_pressures = calibration_self["Pressure_corrected"].to_numpy()
+
+    ONE_HOUR_NS = 3600 * 1_000_000_000
+
+    results = []
+
+    for _, w in weather_df.iterrows():
+        t_weather = w["Time"]
+        t_weather_ns = t_weather.value
+        diffs = np.abs(self_times_ns - t_weather_ns)
+
+        within_range = diffs <= ONE_HOUR_NS
+
+        if within_range.any():
+            idx = diffs.argmin()
+            matched = self_pressures[idx]
+        else:
+            matched = None
+
+        row_dict = w.to_dict()
+        if (matched):
+            row_dict["Pressure_self_corrected"] = matched 
+        else:
+            row_dict["Pressure_self_corrected"] = row_dict["pressure"] 
+
+        results.append(row_dict)
+    
+    merged_df = pd.DataFrame(results).sort_values("Time")
+
+    merged_df.to_csv("merge_output.csv", index=False)
+
+    return merged_df
 
 def get_latest_pressure_sequence(scaler_x):
     # 1. fusion
@@ -186,5 +288,6 @@ def get_latest_weather_sequence(scaler_weather):
 
 if __name__ == "__main__":
     aligned = data_fusion()
-    aligned = calibration(aligned)
-    draw_calibration(aligned)
+    calibration_self = calibration(aligned)
+    # draw_calibration(aligned)
+    data_fusion_2(calibration_self)

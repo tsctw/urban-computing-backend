@@ -13,7 +13,7 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 
 # 你自己的 fusion + calibration
-from fusion import data_fusion, calibration
+from fusion import data_fusion, calibration, data_fusion_2
 
 # -----------------------------
 # CONFIG
@@ -36,11 +36,13 @@ def load_fused_and_calibrated_data():
     aligned = data_fusion()
 
     print("🔧 Running calibration...")
-    aligned = calibration(aligned)
+    calibration_self = calibration(aligned)
+
+    data = data_fusion_2(calibration_self)
 
     # 只保留 Pressure_corrected + 氣象特徵
     feature_cols = [
-        "Pressure_corrected",
+        "Pressure_self_corrected",
         "temperature",
         "humidity",
         "dew_point",
@@ -50,14 +52,14 @@ def load_fused_and_calibrated_data():
     ]
 
     for c in feature_cols:
-        if c not in aligned.columns:
+        if c not in data.columns:
             raise ValueError(f"Missing required feature: {c}")
 
     # X features
-    features = aligned[feature_cols].values.astype("float32")
+    features = data[feature_cols].values.astype("float32")
 
     # y labels
-    weather_series = aligned["weather_main"].astype(str)
+    weather_series = data["weather_main"].astype(str)
     labels, uniques = pd.factorize(weather_series)
 
     print("\n🌤 Weather classes found:", list(uniques))
