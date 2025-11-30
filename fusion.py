@@ -120,7 +120,7 @@ def draw_calibration(aligned):
     plt.plot(aligned["Time"], aligned["diff_before"], label="Before Calibration", alpha=0.7)
     plt.plot(aligned["Time"], aligned["diff_after"], label="After Calibration", alpha=0.7)
     plt.axhline(0, color="black", linestyle="--")
-    plt.title("Pressure Difference (Self vs Weather) Before / After Calibration")
+    plt.title("Pressure Difference (Self/Calibrated Self vs Weather) Before / After Calibration")
     plt.ylabel("Difference (hPa)")
     plt.legend()
     plt.grid(True)
@@ -140,14 +140,6 @@ def draw_calibration(aligned):
     plt.show()
 
 def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    將 df（含 Time、Pressure_corrected）按照 5 分鐘 gap 壓縮分組：
-      - Time 按升冪排序
-      - 與上一筆差 < 5 min → 同組
-      - 差 >= 5 min → 新組
-      - Time 使用每組第一筆
-      - 平均 Pressure_corrected
-    """
     df = df[["Time","Pressure_self", "Pressure_weather", "Pressure_corrected"]].copy()
     df["Time"] = pd.to_datetime(df["Time"])
     df = df.sort_values("Time")
@@ -185,7 +177,6 @@ def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
 
         prev_time = t
 
-    # 收最後一組（修正欄名！）
     groups.append({
         "Time": current_start_time,
         "Pressure_self": sum(current_raw_values) / len(current_raw_values),
@@ -196,7 +187,7 @@ def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
     out_df = pd.DataFrame(groups).sort_values("Time").reset_index(drop=True)
     return out_df
 
-def data_fusion_2(calibration_self):
+def merge_data(calibration_self):
     # -----------------------------------
     # 1. Load data
     # -----------------------------------
@@ -208,7 +199,7 @@ def data_fusion_2(calibration_self):
     calibration_self = compress_by_5min_gap(calibration_self)
     calibration_self.to_csv("compress_self_output.csv", index=False)
 
-    # 時間 & 三種 pressure
+    # three different pressure
     self_times_ns = calibration_self["Time"].astype("int64").to_numpy()
 
     self_pressures_corrected = calibration_self["Pressure_corrected"].to_numpy()
@@ -222,10 +213,10 @@ def data_fusion_2(calibration_self):
         t_weather = w["Time"]
         t_weather_ns = t_weather.value  # Timestamp → ns
 
-        # 計算與 self 所有 time 的差異
+        # cal time difference
         diffs = np.abs(self_times_ns - t_weather_ns)
 
-        # 1 小時內
+        # in 1 hour
         within_range = diffs <= ONE_HOUR_NS
 
         if within_range.any():
@@ -235,7 +226,6 @@ def data_fusion_2(calibration_self):
             matched_self = self_pressures_raw[idx]
 
         else:
-            # 找不到 → fallback 用 OpenWeatherAPI 自己的壓力
             matched_corrected = None
             matched_self = None
             matched_weather = None
@@ -302,7 +292,7 @@ def get_latest_weather_sequence(scaler_weather):
     if len(aligned) < SEQ_LEN:
         raise ValueError("Not enough data for 24-step sequence.")
 
-    # 取最後 24 row 的所有特徵
+    # get features in last 24 row
     seq = aligned[FEATURE_COLS].values[-SEQ_LEN:].astype("float32")
 
     seq_scaled = scaler_weather.transform(seq)
@@ -313,7 +303,7 @@ def get_latest_weather_sequence(scaler_weather):
 
 if __name__ == "__main__":
     aligned = data_fusion()
-    draw_fusion(aligned)
-    # calibration_self = calibration(aligned)
-    # draw_calibration(aligned)
-    # data_fusion_2(calibration_self)
+    # draw_fusion(aligned)
+    calibration_self = calibration(aligned)
+    draw_calibration(aligned)
+    # merge_data(calibration_self)

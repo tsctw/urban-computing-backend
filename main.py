@@ -1,10 +1,10 @@
 from typing import List
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.cloud import storage
 from utils import read_gcs_csv, process_zip_file
-from fusion import calibration, data_fusion, data_fusion_2, get_latest_pressure_sequence, get_latest_weather_sequence
+from fusion import calibration, data_fusion, merge_data, get_latest_pressure_sequence, get_latest_weather_sequence
 import numpy as np
 import pandas as pd
 import json
@@ -54,11 +54,9 @@ ALL_DATA_FILE = "all_data.csv"
 def get_open_weather_data():
     df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
 
-    # 🛠 修正 NaN / Inf → 轉成 None，避免 JSON encode 崩潰
     df = df.replace([float("inf"), float("-inf")], pd.NA)
     df = df.fillna(pd.NA)
 
-    # 用 pandas.to_json 保證正確序列化
     records = json.loads(df.to_json(orient="records"))
 
     return {"status": "success", "records": records}
@@ -132,17 +130,16 @@ def prediction_pressure():
 
         df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
 
-        # 🛠 修正 NaN / Inf → 轉成 None，避免 JSON encode 崩潰
         df = df.replace([float("inf"), float("-inf")], pd.NA)
         df = df.fillna(pd.NA)
 
-        # 1. 先按時間降冪 → 找最新 10 筆
+        # 1. Sort by time in descending order → get the newest 10 records
         latest10 = df.sort_values("timestamp", ascending=False).head(10)
 
-        # 2. 再把這10筆按時間升冪排序
+        # 2. Then sort these 10 records again in ascending time order
         latest10_sorted = latest10.sort_values("timestamp", ascending=True)
 
-        # 3. 只取壓力欄位（假設叫 Pressure_weather）
+        # 3. Extract only the pressure column (assumed to be named Pressure_weather)
         pressure_last10 = latest10_sorted["pressure"].tolist()
 
 
@@ -218,13 +215,12 @@ def sanitize_df(df: pd.DataFrame):
     df = df.replace([np.inf, -np.inf], pd.NA)
     df = df.where(pd.notnull(df), None)
 
-    # 強制所有欄位轉成可 JSON 的型別
     safe_records = []
     for _, row in df.iterrows():
         record = {}
         for k, v in row.items():
 
-            # pandas Timestamp 處理
+            # pandas Timestamp
             if isinstance(v, pd.Timestamp):
                 record[k] = int(v.timestamp())   # or v.isoformat()
 
@@ -249,7 +245,7 @@ def historical_weather():
     try:
         aligned = data_fusion()
         calibration_self = calibration(aligned)
-        data = data_fusion_2(calibration_self)
+        data = merge_data(calibration_self)
 
         data = data[[
             "timestamp",

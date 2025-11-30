@@ -1,27 +1,26 @@
-# train_weather_fused.py
-# 使用融合 + 校正後 Pressure_corrected 當輸入
-# 預測未來 weather_main 分類序列
+# train_weather_fused_lstm.py
+# Use the fused and calibrated Pressure_corrected as the input
+# Predict the future weather_main classification sequence (LSTM version)
+
 
 import io
 import json
 import numpy as np
 import pandas as pd
-from google.cloud import storage
 from sklearn.preprocessing import StandardScaler
 import joblib
 import tensorflow as tf
 from tensorflow.keras import layers, models
 
-# 你自己的 fusion + calibration
-from fusion import data_fusion, calibration, data_fusion_2
+from fusion import data_fusion, calibration, merge_data
 
 # -----------------------------
 # CONFIG
 # -----------------------------
 SEQ_LEN = 24
-FUTURE_6_STEPS = 3
-FUTURE_12_STEPS = 6
-FUTURE_24_STEPS = 12
+FUTURE_6 = 3
+FUTURE_12 = 6
+FUTURE_24 = 12
 
 MODEL_OUTPUT = "model_weather.keras"
 SCALER_OUTPUT = "scaler_weather.pkl"
@@ -29,7 +28,7 @@ LABEL_MAP_OUTPUT = "weather_label_map.json"
 
 
 # -----------------------------
-# 1. 取得融合 + 校正後資料
+# 1. # Use the fused and calibrated Pressure_corrected as the input
 # -----------------------------
 def load_fused_and_calibrated_data():
     print("🔄 Running data fusion...")
@@ -37,10 +36,8 @@ def load_fused_and_calibrated_data():
 
     print("🔧 Running calibration...")
     calibration_self = calibration(aligned)
+    data = merge_data(calibration_self)
 
-    data = data_fusion_2(calibration_self)
-
-    # 只保留 Pressure_corrected + 氣象特徵
     feature_cols = [
         "Pressure_self_corrected",
         "temperature",
@@ -53,22 +50,18 @@ def load_fused_and_calibrated_data():
 
     for c in feature_cols:
         if c not in data.columns:
-            raise ValueError(f"Missing required feature: {c}")
+            raise ValueError(f"Missing feature: {c}")
 
-    # X features
     features = data[feature_cols].values.astype("float32")
 
-    # y labels
     weather_series = data["weather_main"].astype(str)
     labels, uniques = pd.factorize(weather_series)
 
-    print("\n🌤 Weather classes found:", list(uniques))
+    print("\n🌤 Weather classes:", list(uniques))
 
     num_classes = len(uniques)
-
     id_to_label = {int(i): str(label) for i, label in enumerate(uniques)}
 
-    # Scale X
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
 
@@ -76,78 +69,89 @@ def load_fused_and_calibrated_data():
 
 
 # -----------------------------
-# 2. 建立序列資料
+# 2. Sequence data construction (one-hot classification)
 # -----------------------------
 def build_sequences(features, labels, num_classes):
-    X = []
-    y6_seq, y12_seq, y24_seq = [], [], []
+    X, y6, y12, y24 = [], [], [], []
 
-    max_index = len(features) - (SEQ_LEN + FUTURE_24_STEPS)
-    if max_index <= 0:
-        raise ValueError("Not enough data to build sequences")
+    max_idx = len(features) - (SEQ_LEN + FUTURE_24)
+    if max_idx <= 0:
+        raise ValueError("Not enough data")
 
-    for i in range(max_index):
-        seq_x = features[i : i + SEQ_LEN]
+    for i in range(max_idx):
+        X.append(features[i:i+SEQ_LEN])
 
-        seq_6  = labels[i + SEQ_LEN : i + SEQ_LEN + FUTURE_6_STEPS]
-        seq_12 = labels[i + SEQ_LEN : i + SEQ_LEN + FUTURE_12_STEPS]
-        seq_24 = labels[i + SEQ_LEN : i + SEQ_LEN + FUTURE_24_STEPS]
-
-        if len(seq_6) != FUTURE_6_STEPS: continue
-        if len(seq_12) != FUTURE_12_STEPS: continue
-        if len(seq_24) != FUTURE_24_STEPS: continue
-
-        X.append(seq_x)
-        y6_seq.append(tf.keras.utils.to_categorical(seq_6,  num_classes))
-        y12_seq.append(tf.keras.utils.to_categorical(seq_12, num_classes))
-        y24_seq.append(tf.keras.utils.to_categorical(seq_24, num_classes))
+        y6.append(tf.keras.utils.to_categorical(
+            labels[i+SEQ_LEN : i+SEQ_LEN+FUTURE_6], num_classes))
+        y12.append(tf.keras.utils.to_categorical(
+            labels[i+SEQ_LEN : i+SEQ_LEN+FUTURE_12], num_classes))
+        y24.append(tf.keras.utils.to_categorical(
+            labels[i+SEQ_LEN : i+SEQ_LEN+FUTURE_24], num_classes))
 
     X = np.array(X)
-    y6_seq = np.array(y6_seq)
-    y12_seq = np.array(y12_seq)
-    y24_seq = np.array(y24_seq)
+    y6 = np.array(y6)
+    y12 = np.array(y12)
+    y24 = np.array(y24)
 
-    print("\n📦 Sequence built:")
-    print("  X:", X.shape)
-    print("  y6:", y6_seq.shape)
-    print("  y12:", y12_seq.shape)
-    print("  y24:", y24_seq.shape)
+    print("\n📦 Sequence shapes:")
+    print(" X:", X.shape)
+    print(" y6:", y6.shape)
+    print(" y12:", y12.shape)
+    print(" y24:", y24.shape)
 
-    return X, [y6_seq, y12_seq, y24_seq]
+    return X, [y6, y12, y24]
 
 
 # -----------------------------
-# 3. GRU multi-step weather classifier
+# 3. LSTM Encoder–Decoder multi-step classification model
 # -----------------------------
-def build_weather_multistep_model(timesteps, feature_dim, num_classes):
-    inputs = layers.Input(shape=(timesteps, feature_dim))
+def build_weather_model(feature_dim, num_classes):
+    inputs = layers.Input(shape=(SEQ_LEN, feature_dim))
 
-    x = layers.GRU(128, return_sequences=False)(inputs)
-    x = layers.Dense(128, activation="relu")(x)
+    # Encoder
+    x = layers.LSTM(128, return_sequences=True)(inputs)
+    x = layers.Dropout(0.1)(x)
+    x = layers.LSTM(64, return_sequences=False)(x)
 
-    w6  = layers.Dense(FUTURE_6_STEPS  * num_classes, activation="softmax")(x)
-    w12 = layers.Dense(FUTURE_12_STEPS * num_classes, activation="softmax")(x)
-    w24 = layers.Dense(FUTURE_24_STEPS * num_classes, activation="softmax")(x)
+    # Shared embedding
+    latent = layers.Dense(64, activation="relu")(x)
 
-    w6  = layers.Reshape((FUTURE_6_STEPS,  num_classes), name="w6")(w6)
-    w12 = layers.Reshape((FUTURE_12_STEPS, num_classes), name="w12")(w12)
-    w24 = layers.Reshape((FUTURE_24_STEPS, num_classes), name="w24")(w24)
+    # ------------- Decoder 6h -------------
+    d6 = layers.RepeatVector(FUTURE_6)(latent)
+    d6 = layers.LSTM(64, return_sequences=True)(d6)
+    out6 = layers.TimeDistributed(
+        layers.Dense(num_classes, activation="softmax"),
+        name="w6"
+    )(d6)
 
-    model = models.Model(inputs, [w6, w12, w24])
+    # ------------- Decoder 12h -------------
+    d12 = layers.RepeatVector(FUTURE_12)(latent)
+    d12 = layers.LSTM(64, return_sequences=True)(d12)
+    out12 = layers.TimeDistributed(
+        layers.Dense(num_classes, activation="softmax"),
+        name="w12"
+    )(d12)
+
+    # ------------- Decoder 24h -------------
+    d24 = layers.RepeatVector(FUTURE_24)(latent)
+    d24 = layers.LSTM(64, return_sequences=True)(d24)
+    out24 = layers.TimeDistributed(
+        layers.Dense(num_classes, activation="softmax"),
+        name="w24"
+    )(d24)
+
+    model = models.Model(inputs, [out6, out12, out24])
 
     model.compile(
-    optimizer="adam",
-    loss={
-        "w6": "categorical_crossentropy",
-        "w12": "categorical_crossentropy",
-        "w24": "categorical_crossentropy"
-    },
-    metrics={
-        "w6": ["accuracy"],
-        "w12": ["accuracy"],
-        "w24": ["accuracy"]
-    }
-)
+        optimizer="adam",
+        loss={
+            "w6":  "categorical_crossentropy",
+            "w12": "categorical_crossentropy",
+            "w24": "categorical_crossentropy",
+        },
+        loss_weights={"w6": 0.5, "w12": 0.3, "w24": 0.2},
+        metrics={"w6": "accuracy", "w12": "accuracy", "w24": "accuracy"},
+    )
 
     return model
 
@@ -160,17 +164,23 @@ if __name__ == "__main__":
 
     X, y_list = build_sequences(features_scaled, labels, num_classes)
 
-    model = build_weather_multistep_model(SEQ_LEN, X.shape[-1], num_classes)
+    model = build_weather_model(X.shape[-1], num_classes)
     model.summary()
 
-    print("\n🚀 Training multi-step weather model...\n")
+    print("\n🚀 Training LSTM multi-step weather model...\n")
+
+    cb = [
+        tf.keras.callbacks.EarlyStopping(patience=6, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=3)
+    ]
 
     history = model.fit(
         X,
         {"w6": y_list[0], "w12": y_list[1], "w24": y_list[2]},
-        epochs=30,
+        epochs=40,
         batch_size=32,
         validation_split=0.2,
+        callbacks=cb,
         verbose=1,
     )
 
