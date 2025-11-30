@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google.cloud import storage
 from utils import read_gcs_csv, process_zip_file
-from fusion import get_latest_pressure_sequence, get_latest_weather_sequence
+from fusion import calibration, data_fusion, data_fusion_2, get_latest_pressure_sequence, get_latest_weather_sequence
 import numpy as np
 import pandas as pd
 import json
@@ -211,5 +211,61 @@ def prediction_weather():
             }
         }
 
+    except Exception as e:
+        return {"error": str(e)}
+
+def sanitize_df(df: pd.DataFrame):
+    df = df.replace([np.inf, -np.inf], pd.NA)
+    df = df.where(pd.notnull(df), None)
+
+    # 強制所有欄位轉成可 JSON 的型別
+    safe_records = []
+    for _, row in df.iterrows():
+        record = {}
+        for k, v in row.items():
+
+            # pandas Timestamp 處理
+            if isinstance(v, pd.Timestamp):
+                record[k] = int(v.timestamp())   # or v.isoformat()
+
+            # numpy types → native
+            elif isinstance(v, (np.integer)):
+                record[k] = int(v)
+            elif isinstance(v, (np.floating)):
+                if pd.isna(v):
+                    record[k] = None
+                else:
+                    record[k] = float(v)
+            else:
+                record[k] = v
+
+        safe_records.append(record)
+
+    return safe_records
+
+
+@app.get("/historical_weather")
+def historical_weather():
+    try:
+        aligned = data_fusion()
+        calibration_self = calibration(aligned)
+        data = data_fusion_2(calibration_self)
+
+        data = data[[
+            "timestamp",
+            "pressure",
+            "Pressure_self",
+            "Pressure_self_corrected",
+            "weather_main"
+        ]]
+
+        json_str = data.to_json(orient="records")
+
+
+
+        return {
+            "status": "success",
+            "records": json_str
+        }
     except Exception as e:
         return {"error": str(e)}

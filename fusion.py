@@ -148,7 +148,7 @@ def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
       - Time 使用每組第一筆
       - 平均 Pressure_corrected
     """
-    df = df[["Time", "Pressure_corrected"]].copy()
+    df = df[["Time","Pressure_self", "Pressure_weather", "Pressure_corrected"]].copy()
     df["Time"] = pd.to_datetime(df["Time"])
     df = df.sort_values("Time")
 
@@ -157,21 +157,30 @@ def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
 
     groups = []
     current_start_time = df.iloc[0]["Time"]
+    current_raw_values = [df.iloc[0]["Pressure_self"]]
+    current_weather_pressure_value = [df.iloc[0]["Pressure_weather"]]
     current_values = [df.iloc[0]["Pressure_corrected"]]
     prev_time = df.iloc[0]["Time"]
 
     for i in range(1, len(df)):
         t = df.iloc[i]["Time"]
+        s = df.iloc[i]["Pressure_self"]
+        w = df.iloc[i]["Pressure_weather"]
         p = df.iloc[i]["Pressure_corrected"]
 
         if t - prev_time < pd.Timedelta(minutes=5):
+            current_raw_values.append(s)
             current_values.append(p)
         else:
             groups.append({
                 "Time": current_start_time,
+                "Pressure_self": sum(current_raw_values) / len(current_raw_values),
+                "Pressure_weather": current_weather_pressure_value,
                 "Pressure_corrected": sum(current_values) / len(current_values)
             })
             current_start_time = t
+            current_raw_values = [s]
+            current_weather_pressure_value = w
             current_values = [p]
 
         prev_time = t
@@ -179,6 +188,8 @@ def compress_by_5min_gap(df: pd.DataFrame) -> pd.DataFrame:
     # 收最後一組（修正欄名！）
     groups.append({
         "Time": current_start_time,
+        "Pressure_self": sum(current_raw_values) / len(current_raw_values),
+        "Pressure_weather": current_weather_pressure_value,
         "Pressure_corrected": sum(current_values) / len(current_values)
     })
 
@@ -195,11 +206,13 @@ def data_fusion_2(calibration_self):
     weather_df["Time"] = pd.to_datetime(weather_df["timestamp"], unit="s", utc=True).dt.tz_convert("Europe/Dublin")
 
     calibration_self = compress_by_5min_gap(calibration_self)
-    calibration_self.to_csv("balbalbal_output.csv", index=False)
+    calibration_self.to_csv("compress_self_output.csv", index=False)
 
-    self_times_ns    = calibration_self["Time"].astype("int64").to_numpy()
+    # 時間 & 三種 pressure
+    self_times_ns = calibration_self["Time"].astype("int64").to_numpy()
 
-    self_pressures = calibration_self["Pressure_corrected"].to_numpy()
+    self_pressures_corrected = calibration_self["Pressure_corrected"].to_numpy()
+    self_pressures_raw = calibration_self["Pressure_self"].to_numpy()
 
     ONE_HOUR_NS = 3600 * 1_000_000_000
 
@@ -207,22 +220,34 @@ def data_fusion_2(calibration_self):
 
     for _, w in weather_df.iterrows():
         t_weather = w["Time"]
-        t_weather_ns = t_weather.value
+        t_weather_ns = t_weather.value  # Timestamp → ns
+
+        # 計算與 self 所有 time 的差異
         diffs = np.abs(self_times_ns - t_weather_ns)
 
+        # 1 小時內
         within_range = diffs <= ONE_HOUR_NS
 
         if within_range.any():
             idx = diffs.argmin()
-            matched = self_pressures[idx]
+
+            matched_corrected = self_pressures_corrected[idx]
+            matched_self = self_pressures_raw[idx]
+
         else:
-            matched = None
+            # 找不到 → fallback 用 OpenWeatherAPI 自己的壓力
+            matched_corrected = None
+            matched_self = None
+            matched_weather = None
 
         row_dict = w.to_dict()
-        if (matched):
-            row_dict["Pressure_self_corrected"] = matched 
-        else:
-            row_dict["Pressure_self_corrected"] = row_dict["pressure"] 
+
+        row_dict["Pressure_self_corrected"] = (
+            matched_corrected if matched_corrected is not None else row_dict["pressure"]
+        )
+        row_dict["Pressure_self"] = (
+            matched_self if matched_self is not None else None
+        )
 
         results.append(row_dict)
     
@@ -288,6 +313,7 @@ def get_latest_weather_sequence(scaler_weather):
 
 if __name__ == "__main__":
     aligned = data_fusion()
-    calibration_self = calibration(aligned)
+    draw_fusion(aligned)
+    # calibration_self = calibration(aligned)
     # draw_calibration(aligned)
-    data_fusion_2(calibration_self)
+    # data_fusion_2(calibration_self)
