@@ -29,7 +29,6 @@ def load_and_prepare_data():
     X_raw = data["Pressure_train"].values.astype("float32").reshape(-1, 1)
     y_raw = X_raw.copy()
 
-    # 標準化
     scaler_x = StandardScaler()
     X_scaled = scaler_x.fit_transform(X_raw)
 

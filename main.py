@@ -2,7 +2,6 @@ from typing import List
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google.cloud import storage
 from utils import read_gcs_csv, process_zip_file
 from fusion import calibration, data_fusion, merge_data, get_latest_pressure_sequence, get_latest_weather_sequence
 import numpy as np
@@ -38,12 +37,10 @@ class SensorData(BaseModel):
 def read_root():
     return {"message": "FastAPI backend is running!"}
 
-SELF_DATA_BUCKET_NAME = "urban-computing-self-data-processed"
-SELF_DATA_FILE = "merged.csv"
-
 @app.get("/selfdata")
 def get_self_data():
-    df = read_gcs_csv(SELF_DATA_BUCKET_NAME, SELF_DATA_FILE)
+    df = pd.read_csv("merged.csv")
+    
     records = df.to_dict(orient="records")
     return {"status": "success", "records": records}
 
@@ -52,7 +49,7 @@ ALL_DATA_FILE = "all_data.csv"
 
 @app.get("/openweatherdata")
 def get_open_weather_data():
-    df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
+    df = pd.read_csv("all_data.csv")
 
     df = df.replace([float("inf"), float("-inf")], pd.NA)
     df = df.fillna(pd.NA)
@@ -65,9 +62,8 @@ def get_open_weather_data():
 # Upload single file
 @app.post("/upload")
 async def upload_zip(file: UploadFile = File(...)):
-    storage_client = storage.Client()
     try:
-        filename = process_zip_file(file, storage_client)
+        filename = process_zip_file(file, None)
         return {"status": "success", "file": filename}
     except HTTPException as e:
         raise e
@@ -78,13 +74,13 @@ async def upload_zip(file: UploadFile = File(...)):
 # Upload batch files
 @app.post("/upload_batch")
 async def upload_batch(files: List[UploadFile] = File(...)):
-    storage_client = storage.Client()
+    # storage_client = storage.Client()
     success_files = []
     failed_files = []
 
     for file in files:
         try:
-            filename = process_zip_file(file, storage_client)
+            filename = process_zip_file(file, None)
             success_files.append(filename)
         except Exception as e:
             print(f"❌ Failed {file.filename}: {e}")

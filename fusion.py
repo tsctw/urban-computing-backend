@@ -4,17 +4,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 
-SELF_DATA_BUCKET_NAME = "urban-computing-self-data-processed"
-SELF_DATA_FILE = "merged.csv"
-
-WEATHER_DATA_BUCKET_NAME = "urban-computing-api-data-processed"
-ALL_DATA_FILE = "all_data.csv"
 
 SEQ_LEN = 24
 
 def data_fusion():
-    self_df = read_gcs_csv(SELF_DATA_BUCKET_NAME, SELF_DATA_FILE)
-    weather_df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
+    self_df = pd.read_csv("merged.csv")
+    weather_df = pd.read_csv("all_data.csv")
 
     self_df["Time"] = pd.to_datetime(self_df["Time"], unit="s", utc=True).dt.tz_convert("Europe/Dublin")
 
@@ -191,7 +186,7 @@ def merge_data(calibration_self):
     # -----------------------------------
     # 1. Load data
     # -----------------------------------
-    weather_df = read_gcs_csv(WEATHER_DATA_BUCKET_NAME, ALL_DATA_FILE)
+    weather_df = pd.read_csv("all_data.csv")
 
     # Convert timestamp
     weather_df["Time"] = pd.to_datetime(weather_df["timestamp"], unit="s", utc=True).dt.tz_convert("Europe/Dublin")
